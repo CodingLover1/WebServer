@@ -7,8 +7,8 @@
 
 class sem{
 public:
-    sem(){
-        if(sem_init(&m_sem,0,0)!=0){
+    sem(unsigned int val=0){
+        if(sem_init(&m_sem,0,val)!=0){
             throw std::exception();  //constructor don't have return val,if error,throw a exception
         }
     }
