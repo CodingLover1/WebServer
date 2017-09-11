@@ -3,8 +3,8 @@
 
 ### How to use it
 * make a dir in /var.like this /var/www/html
-* then make a file like index.html
-* compile the server:g++ main.cpp http_conn.cpp pool_cgi.cpp -o WebServer -lpthread
+* then make a file like index.html under the /var/www/html
+* compile the server:make 
 * in the browser input http://ip:port/index.html
 
 
