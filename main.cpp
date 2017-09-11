@@ -9,37 +9,35 @@
 #include <stdlib.h>
 #include <cassert>
 #include <sys/epoll.h>
-
+#include <semaphore.h>
 #include "locker.h"
 #include "threadpool.h"
 #include "http_conn.h"
-
 #define MAX_FD 65536
 #define MAX_EVENT_NUMBER 10000
 
-extern int addfd( int epollfd, int fd, bool one_shot );
-extern int removefd( int epollfd, int fd );
-extern void addsig(int sig,void(handler)(int),bool restart=true);
-//void addsig( int sig, void( handler )(int), bool restart = true )
-//{
-//    struct sigaction sa;
-//    memset( &sa, '\0', sizeof( sa ) );
-//    sa.sa_handler = handler;
-//    if( restart )
-//    {
-//        sa.sa_flags |= SA_RESTART;
-//    }
-//    sigfillset( &sa.sa_mask );
-//    assert( sigaction( sig, &sa, NULL ) != -1 );
-//}
+extern int addfd(int epollfd,int fd,bool one_shot);
+extern int removefd(int epollfd,int fd);
+
+void addsig( int sig, void( handler )(int), bool restart = true )
+{
+   struct sigaction sa;
+   memset( &sa, '\0', sizeof( sa ) );
+   sa.sa_handler = handler;
+   if( restart )
+   {
+       sa.sa_flags |= SA_RESTART;
+   }
+   sigfillset( &sa.sa_mask );
+   assert( sigaction( sig, &sa, NULL ) != -1 );
+}
 
 void show_error( int connfd, const char* info )
 {
     printf( "%s", info );
-    send( connfd, info, strlen( info ), 0 );
+    send( connfd, info, strlen( info ), 0 ); //向socket中写入出错信息
     close( connfd );
 }
-
 
 int main( int argc, char* argv[] )
 {
@@ -51,7 +49,7 @@ int main( int argc, char* argv[] )
     const char* ip = argv[1];
     int port = atoi( argv[2] );
 
-    addsig( SIGPIPE, SIG_IGN );
+    addsig( SIGPIPE, SIG_IGN );  //忽略SIGPIPE信号
 
     threadpool< http_conn >* pool = NULL;
     try
@@ -63,13 +61,15 @@ int main( int argc, char* argv[] )
         return 1;
     }
 
-    http_conn* users = new http_conn[ MAX_FD ];
+    http_conn* users = new http_conn[ MAX_FD ]; //定义用户的连接数量
     assert( users );
     int user_count = 0;
 
     int listenfd = socket( PF_INET, SOCK_STREAM, 0 );
     assert( listenfd >= 0 );
-    struct linger tmp = { 1, 0 };
+    struct linger tmp = { 1, 0 };//close()立刻返回，但不会发送未发送完成的数据，而是通过一个REST包强制的关闭socket描述符，即强制退出。
+    
+    
     setsockopt( listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof( tmp ) );
 
     int ret = 0;

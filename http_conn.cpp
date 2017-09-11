@@ -10,14 +10,14 @@ const char* error_404_form = "The requested file was not found on this server.\n
 const char* error_500_title = "Internal Error";
 const char* error_500_form = "There was an unusual problem serving the requested file.\n";
 const char* doc_root = "/var/www/html";
-extern int setnonblocking(int fd);
-//int setnonblocking( int fd )
-//{
-//    int old_option = fcntl( fd, F_GETFL );
-//    int new_option = old_option | O_NONBLOCK;
-//    fcntl( fd, F_SETFL, new_option );
-//    return old_option;
-//}
+
+int setnonblocking( int fd )
+{
+   int old_option = fcntl( fd, F_GETFL );
+   int new_option = old_option | O_NONBLOCK;
+   fcntl( fd, F_SETFL, new_option );
+   return old_option;
+}
 
 void addfd( int epollfd, int fd, bool one_shot )
 {
