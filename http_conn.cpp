@@ -19,6 +19,11 @@ int setnonblocking( int fd )
    return old_option;
 }
 
+// epoll的事件触发机制有2种，一种是ET（边缘触发），另一种是LT （水平触发），当一个socket的事件到来，socket处于就绪状态，
+// 将socket交给线程处理，若是ET模式，则触发一次该事件，他会删掉就绪队列中的socket，若是LT模式，直到该事件完成前，
+// 该socket一直都在就绪队列中，所以会一直触发，这时就可能发生将同一socket事件交给不同的线程去处理，为了避免这个问题，可以为
+// 该socket注册EPOLLONESHOT事件，保证该事件只会被触发一次。
+
 void addfd( int epollfd, int fd, bool one_shot )
 {
     epoll_event event;
@@ -64,11 +69,11 @@ void http_conn::init( int sockfd, const sockaddr_in& addr )
 {
     m_sockfd = sockfd;
     m_address = addr;
-    int error = 0;
-    socklen_t len = sizeof( error );
-    getsockopt( m_sockfd, SOL_SOCKET, SO_ERROR, &error, &len );
-    int reuse = 1;
-    setsockopt( m_sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof( reuse ) );
+    // int error = 0;
+    // socklen_t len = sizeof( error );
+    // getsockopt( m_sockfd, SOL_SOCKET, SO_ERROR, &error, &len );
+    // int reuse = 1;
+    // setsockopt( m_sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof( reuse ) );
     addfd( m_epollfd, sockfd, true );
     m_user_count++;
 
@@ -92,6 +97,109 @@ void http_conn::init()
     memset( m_read_buf, '\0', READ_BUFFER_SIZE );
     memset( m_write_buf, '\0', WRITE_BUFFER_SIZE );
     memset( m_real_file, '\0', FILENAME_LEN );
+}
+bool http_conn::read()
+{
+    if( m_read_idx >= READ_BUFFER_SIZE )
+    {
+        return false;
+    }
+
+    int bytes_read = 0;
+    while( true )
+    {
+        bytes_read = recv( m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0 );
+        if ( bytes_read == -1 )
+        {
+            if( errno == EAGAIN || errno == EWOULDBLOCK )
+            {
+                break;
+            }
+            return false;
+        }
+        else if ( bytes_read == 0 )
+        {
+            return false;
+        }
+
+        m_read_idx += bytes_read;
+    }
+    return true;
+}
+
+void http_conn::process()
+{
+    HTTP_CODE read_ret = process_read();
+    if ( read_ret == NO_REQUEST )
+    {
+        modfd( m_epollfd, m_sockfd, EPOLLIN );
+        return;
+    }
+
+    bool write_ret = process_write( read_ret );
+    if ( ! write_ret )
+    {
+        close_conn();
+    }
+
+    modfd( m_epollfd, m_sockfd, EPOLLOUT );
+}
+
+http_conn::HTTP_CODE http_conn::process_read()
+{
+    LINE_STATUS line_status = LINE_OK;
+    HTTP_CODE ret = NO_REQUEST;
+    char* text = 0;
+
+    while ( ( ( m_check_state == CHECK_STATE_CONTENT ) && ( line_status == LINE_OK  ) )
+                || ( ( line_status = parse_line() ) == LINE_OK ) )
+    {
+        text = get_line();
+        m_start_line = m_checked_idx;
+        printf( "got 1 http line: %s\n", text );
+
+        switch ( m_check_state )
+        {
+            case CHECK_STATE_REQUESTLINE:
+            {
+                ret = parse_request_line( text );
+                if ( ret == BAD_REQUEST )
+                {
+                    return BAD_REQUEST;
+                }
+                break;
+            }
+            case CHECK_STATE_HEADER:
+            {
+                ret = parse_headers( text );
+                if ( ret == BAD_REQUEST )
+                {
+                    return BAD_REQUEST;
+                }
+                else if ( ret == GET_REQUEST )
+                {
+                    return do_request();
+                }
+                break;
+            }
+            case CHECK_STATE_CONTENT:
+            {
+                ret = parse_content( text );
+                if ( ret == GET_REQUEST )
+                {
+                    return do_request();
+                }
+                line_status = LINE_OPEN;
+                break;
+            }
+            default:
+            {
+                return INTERNAL_ERROR;
+            }
+        }
+    }
+
+    return NO_REQUEST;
 }
 
 http_conn::LINE_STATUS http_conn::parse_line()
@@ -128,35 +236,6 @@ http_conn::LINE_STATUS http_conn::parse_line()
     }
 
     return LINE_OPEN;
-}
-
-bool http_conn::read()
-{
-    if( m_read_idx >= READ_BUFFER_SIZE )
-    {
-        return false;
-    }
-
-    int bytes_read = 0;
-    while( true )
-    {
-        bytes_read = recv( m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0 );
-        if ( bytes_read == -1 )
-        {
-            if( errno == EAGAIN || errno == EWOULDBLOCK )
-            {
-                break;
-            }
-            return false;
-        }
-        else if ( bytes_read == 0 )
-        {
-            return false;
-        }
-
-        m_read_idx += bytes_read;
-    }
-    return true;
 }
 
 http_conn::HTTP_CODE http_conn::parse_request_line( char* text )
@@ -264,62 +343,7 @@ http_conn::HTTP_CODE http_conn::parse_content( char* text )
     return NO_REQUEST;
 }
 
-http_conn::HTTP_CODE http_conn::process_read()
-{
-    LINE_STATUS line_status = LINE_OK;
-    HTTP_CODE ret = NO_REQUEST;
-    char* text = 0;
 
-    while ( ( ( m_check_state == CHECK_STATE_CONTENT ) && ( line_status == LINE_OK  ) )
-                || ( ( line_status = parse_line() ) == LINE_OK ) )
-    {
-        text = get_line();
-        m_start_line = m_checked_idx;
-        printf( "got 1 http line: %s\n", text );
-
-        switch ( m_check_state )
-        {
-            case CHECK_STATE_REQUESTLINE:
-            {
-                ret = parse_request_line( text );
-                if ( ret == BAD_REQUEST )
-                {
-                    return BAD_REQUEST;
-                }
-                break;
-            }
-            case CHECK_STATE_HEADER:
-            {
-                ret = parse_headers( text );
-                if ( ret == BAD_REQUEST )
-                {
-                    return BAD_REQUEST;
-                }
-                else if ( ret == GET_REQUEST )
-                {
-                    return do_request();
-                }
-                break;
-            }
-            case CHECK_STATE_CONTENT:
-            {
-                ret = parse_content( text );
-                if ( ret == GET_REQUEST )
-                {
-                    return do_request();
-                }
-                line_status = LINE_OPEN;
-                break;
-            }
-            default:
-            {
-                return INTERNAL_ERROR;
-            }
-        }
-    }
-
-    return NO_REQUEST;
-}
 
 http_conn::HTTP_CODE http_conn::do_request()
 {
@@ -531,21 +555,4 @@ bool http_conn::process_write( HTTP_CODE ret )
     return true;
 }
 
-void http_conn::process()
-{
-    HTTP_CODE read_ret = process_read();
-    if ( read_ret == NO_REQUEST )
-    {
-        modfd( m_epollfd, m_sockfd, EPOLLIN );
-        return;
-    }
-
-    bool write_ret = process_write( read_ret );
-    if ( ! write_ret )
-    {
-        close_conn();
-    }
-
-    modfd( m_epollfd, m_sockfd, EPOLLOUT );
-}
 
